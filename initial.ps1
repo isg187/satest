@@ -1,7 +1,7 @@
 #Requires -RunAsAdministrator
 <#
 .SYNOPSIS
-    Downloads the mecheng repo, flattens scripts to C:\ProgramData\SDL\scripts,
+    Downloads the satest repo, flattens scripts to C:\ProgramData\SDL\scripts,
     and runs every installer in the install folder.
 
 .DESCRIPTION
@@ -12,7 +12,7 @@
 $ErrorActionPreference = 'Stop'
 $Destination = "C:\ProgramData\SDL\scripts"
 $TempPath = "C:\Temp\SoftwareInstall"
-$RepoZipUrl = "https://github.com/isg187/mecheng/archive/refs/heads/main.zip"
+$RepoZipUrl = "https://github.com/isg187/satest/archive/refs/heads/main.zip"
 $InstallDir = Join-Path $Destination "install"
 $LogDir = Join-Path $Destination "logs"
 
@@ -71,7 +71,7 @@ try {
     Write-Log "Log         : $script:LogPath"
 
     # Download repo zip
-    $zipPath = Join-Path $TempPath "mecheng.zip"
+    $zipPath = Join-Path $TempPath "satest.zip"
     Write-Log "Downloading repository zip..."
     Invoke-WebRequest -Uri $RepoZipUrl -OutFile $zipPath -UseBasicParsing
 
@@ -84,9 +84,9 @@ try {
     Write-Log "Extracting zip to $Destination ..."
     Expand-Archive -Path $zipPath -DestinationPath $Destination -Force
 
-    # Flatten single root folder (e.g. mecheng-main)
+    # Flatten single root folder (e.g. satest-main)
     $rootFolder = Get-ChildItem -Path $Destination -Directory -ErrorAction SilentlyContinue |
-    Where-Object { $_.Name -like "mecheng-*" -or $_.Name -like "*-main" -or $_.Name -like "*-master" } |
+    Where-Object { $_.Name -like "satest-*" -or $_.Name -like "*-main" -or $_.Name -like "*-master" } |
     Select-Object -First 1
 
     if (-not $rootFolder) {
