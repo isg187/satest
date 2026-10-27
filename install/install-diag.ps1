@@ -12,10 +12,10 @@
 [CmdletBinding()]
 param(
     [Parameter(Mandatory = $true)]
-    [string]$SharePath,
+    [string]$SharePath = '\\sacimapps.file.core.usgovcloudapi.net\software\7zip',
 
     [Parameter(Mandatory = $true)]
-    [string]$FileName,
+    [string]$FileName = '7Zip-64bit.msi',
 
     [int]$TimeoutSeconds = 30,
 
