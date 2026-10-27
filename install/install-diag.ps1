@@ -7,8 +7,6 @@
     .\diag-share.ps1 -SharePath '\\storage.file.core.usgovcloudapi.net\installers' -FileName '7z-x64.msi'
 #>
 
-#Requires -RunAsAdministrator
-
 [CmdletBinding()]
 param(
     [Parameter(Mandatory = $true)]
@@ -17,55 +15,53 @@ param(
     [Parameter(Mandatory = $true)]
     [string]$FileName = '7Zip-64bit.msi',
 
-    [int]$TimeoutSeconds = 30,
-
-    [string]$LogPath
+    [int]$TimeoutSeconds = 30
 )
 
-$ErrorActionPreference = 'Stop'
+#Requires -Version 5.1
+
+$ErrorActionPreference = 'Continue'
 $ProgressPreference = 'SilentlyContinue'
 
+$logDir = 'C:\ProgramData\SDL\scripts\logs'
+if (-not (Test-Path $logDir)) {
+    New-Item -ItemType Directory -Path $logDir -Force | Out-Null
+}
+$log = Join-Path $logDir ("DiagShare_{0}.log" -f (Get-Date -Format 'yyyyMMdd'))
+
 function Write-Log {
+    param([string]$Message, [string]$Level = 'INFO')
+    $line = '[{0}] [{1}] {2}' -f (Get-Date -Format 'yyyy-MM-dd HH:mm:ss'), $Level, $Message
+    Write-Host $line
+    Add-Content -Path $log -Value $line
+}
+
+function Invoke-Timed {
     param(
-        [Parameter(Position = 0)]
-        [AllowEmptyString()]
-        [string]$Message = '',
-        [ValidateSet('INFO', 'WARN', 'ERROR', 'SUCCESS')]
-        [string]$Level = 'INFO'
+        [scriptblock]$Script,
+        [object[]]$ArgumentList,
+        [string]$Label
     )
 
-    if (-not $script:LogPath) {
-        $script:LogPath = Join-Path $env:TEMP ("DiagShare_{0}.log" -f (Get-Date -Format 'yyyyMMdd'))
+    $job = Start-Job -ScriptBlock $Script -ArgumentList $ArgumentList
+    $done = Wait-Job -Job $job -Timeout $TimeoutSeconds
+    if (-not $done) {
+        Stop-Job -Job $job | Out-Null
+        Remove-Job -Job $job -Force | Out-Null
+        Write-Log "$Label timed out after $TimeoutSeconds s" 'ERROR'
+        exit 1
     }
 
-    $entry = '[{0}] [{1}] {2}' -f (Get-Date -Format 'yyyy-MM-dd HH:mm:ss'), $Level, $Message
-    switch ($Level) {
-        'ERROR' { Write-Host $entry -ForegroundColor Red }
-        'WARN' { Write-Host $entry -ForegroundColor Yellow }
-        'SUCCESS' { Write-Host $entry -ForegroundColor Green }
-        default { Write-Host $entry }
+    $output = Receive-Job -Job $job 2>&1
+    $state = $job.State
+    Remove-Job -Job $job -Force | Out-Null
+
+    if ($state -eq 'Failed') {
+        Write-Log "$Label failed: $output" 'ERROR'
+        exit 1
     }
 
-    $logDir = Split-Path $script:LogPath -Parent
-    if ($logDir -and -not (Test-Path $logDir)) {
-        New-Item -ItemType Directory -Path $logDir -Force | Out-Null
-    }
-    Add-Content -Path $script:LogPath -Value $entry
-}
-
-function Fail-Diag {
-    param([string]$Message)
-    Write-Log $Message -Level ERROR
-    Write-Log 'Diagnostics failed' -Level ERROR
-    exit 1
-}
-
-if ($LogPath) {
-    $script:LogPath = $LogPath
-}
-else {
-    $logDir = 'C:\ProgramData\SDL\scripts\logs'
-    $script:LogPath = Join-Path $logDir ("DiagShare_{0}.log" -f (Get-Date -Format 'yyyyMMdd'))
+    return $output
 }
 
 $SharePath = $SharePath.TrimEnd('\')
@@ -74,76 +70,42 @@ $filePath = Join-Path $SharePath $FileName
 Write-Log '===== Share diagnostics ====='
 Write-Log "Share : $SharePath"
 Write-Log "File  : $filePath"
-Write-Log "Timeout : $TimeoutSeconds s"
 
-try {
-    # 1. UNC root reachable
-    Write-Log 'Testing UNC root...'
-    $shareJob = Start-Job -ScriptBlock {
-        param($p)
-        Test-Path -LiteralPath $p -ErrorAction Stop
-    } -ArgumentList $SharePath
-
-    if (-not (Wait-Job $shareJob -Timeout $TimeoutSeconds)) {
-        Stop-Job $shareJob -Force | Out-Null
-        Remove-Job $shareJob -Force | Out-Null
-        Fail-Diag "UNC root timed out after $TimeoutSeconds s: $SharePath"
-    }
-    $shareOk = Receive-Job $shareJob
-    Remove-Job $shareJob -Force | Out-Null
-    if (-not $shareOk) {
-        Fail-Diag "UNC root not reachable: $SharePath"
-    }
-    Write-Log 'UNC root reachable' -Level SUCCESS
-
-    # 2. Directory listing
-    Write-Log 'Listing share directory...'
-    $dirJob = Start-Job -ScriptBlock {
-        param($p)
-        Get-ChildItem -LiteralPath $p -ErrorAction Stop | Select-Object -ExpandProperty Name
-    } -ArgumentList $SharePath
-
-    if (-not (Wait-Job $dirJob -Timeout $TimeoutSeconds)) {
-        Stop-Job $dirJob -Force | Out-Null
-        Remove-Job $dirJob -Force | Out-Null
-        Fail-Diag "Directory list timed out after $TimeoutSeconds s: $SharePath"
-    }
-    $names = @(Receive-Job $dirJob)
-    Remove-Job $dirJob -Force | Out-Null
-    Write-Log ("Directory listed ({0} item(s))" -f $names.Count) -Level SUCCESS
-    foreach ($n in ($names | Select-Object -First 20)) {
-        Write-Log "  - $n"
-    }
-
-    # 3. File exists and can be opened
-    Write-Log 'Testing file access...'
-    $fileJob = Start-Job -ScriptBlock {
-        param($p)
-        if (-not (Test-Path -LiteralPath $p -ErrorAction Stop)) {
-            throw "File not found: $p"
-        }
-        $fs = [System.IO.File]::Open($p, 'Open', 'Read', 'Read')
-        $len = $fs.Length
-        $fs.Close()
-        return $len
-    } -ArgumentList $filePath
-
-    if (-not (Wait-Job $fileJob -Timeout $TimeoutSeconds)) {
-        Stop-Job $fileJob -Force | Out-Null
-        Remove-Job $fileJob -Force | Out-Null
-        Fail-Diag "File open timed out after $TimeoutSeconds s: $filePath"
-    }
-    $fileResult = Receive-Job $fileJob -ErrorAction SilentlyContinue
-    $fileErr = $fileJob.ChildJobs[0].Error
-    Remove-Job $fileJob -Force | Out-Null
-    if ($fileErr) {
-        Fail-Diag ("File access failed: {0}" -f $fileErr[0].Exception.Message)
-    }
-    Write-Log ("File opened, size {0} bytes" -f $fileResult) -Level SUCCESS
-
-    Write-Log 'Diagnostics passed' -Level SUCCESS
-    exit 0
+# 1. UNC root
+Write-Log 'Testing UNC root'
+$shareOk = Invoke-Timed -Label 'UNC root' -ArgumentList $SharePath -Script {
+    param($p)
+    Test-Path -LiteralPath $p
 }
-catch {
-    Fail-Diag $_.Exception.Message
+if (-not $shareOk) {
+    Write-Log "UNC root not reachable: $SharePath" 'ERROR'
+    exit 1
 }
+Write-Log 'UNC root reachable' 'SUCCESS'
+
+# 2. Directory list
+Write-Log 'Listing directory'
+$names = @(Invoke-Timed -Label 'Directory list' -ArgumentList $SharePath -Script {
+        param($p)
+        (Get-ChildItem -LiteralPath $p | Select-Object -ExpandProperty Name)
+    })
+Write-Log ("Directory listed ({0} item(s))" -f $names.Count) 'SUCCESS'
+foreach ($n in ($names | Select-Object -First 20)) {
+    Write-Log "  - $n"
+}
+
+# 3. Open file
+Write-Log 'Opening file'
+$size = Invoke-Timed -Label 'File open' -ArgumentList $filePath -Script {
+    param($p)
+    if (-not (Test-Path -LiteralPath $p)) {
+        throw "File not found: $p"
+    }
+    $fs = [System.IO.File]::Open($p, 'Open', 'Read', 'Read')
+    $len = $fs.Length
+    $fs.Dispose()
+    $len
+}
+Write-Log "File opened, size $size bytes" 'SUCCESS'
+Write-Log 'Diagnostics passed' 'SUCCESS'
+exit 0
