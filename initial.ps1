@@ -146,7 +146,7 @@ try {
         }
 
         try {
-            & $scriptPath -Force
+            & $scriptPath
             if ($LASTEXITCODE -and $LASTEXITCODE -ne 0) {
                 throw "Exit code $LASTEXITCODE"
             }
