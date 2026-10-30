@@ -6,7 +6,7 @@
 .EXAMPLE
     .\diag-share.ps1 -SharePath '\\storage.file.core.usgovcloudapi.net\installers' -FileName '7z-x64.msi'
 #>
-
+#Requires -Version 5.1
 [CmdletBinding()]
 param(
     [Parameter(Mandatory = $true)]
@@ -17,8 +17,6 @@ param(
 
     [int]$TimeoutSeconds = 30
 )
-
-#Requires -Version 5.1
 
 $ErrorActionPreference = 'Continue'
 $ProgressPreference = 'SilentlyContinue'
@@ -33,35 +31,34 @@ function Write-Log {
     param([string]$Message, [string]$Level = 'INFO')
     $line = '[{0}] [{1}] {2}' -f (Get-Date -Format 'yyyy-MM-dd HH:mm:ss'), $Level, $Message
     Write-Host $line
+    [Console]::Out.Flush()
     Add-Content -Path $log -Value $line
 }
 
-function Invoke-Timed {
+function Invoke-TimedProcess {
     param(
-        [scriptblock]$Script,
-        [object[]]$ArgumentList,
+        [string]$File,
+        [string]$Arguments,
         [string]$Label
     )
 
-    $job = Start-Job -ScriptBlock $Script -ArgumentList $ArgumentList
-    $done = Wait-Job -Job $job -Timeout $TimeoutSeconds
-    if (-not $done) {
-        Stop-Job -Job $job | Out-Null
-        Remove-Job -Job $job -Force | Out-Null
+    $out = Join-Path $env:TEMP ("diag-{0}.txt" -f [guid]::NewGuid().ToString('N'))
+    $p = Start-Process -FilePath $File -ArgumentList $Arguments -NoNewWindow -PassThru -RedirectStandardOutput $out -RedirectStandardError $out
+    if (-not $p.WaitForExit($TimeoutSeconds * 1000)) {
+        try { $p.Kill() } catch {}
         Write-Log "$Label timed out after $TimeoutSeconds s" 'ERROR'
         exit 1
     }
-
-    $output = Receive-Job -Job $job 2>&1
-    $state = $job.State
-    Remove-Job -Job $job -Force | Out-Null
-
-    if ($state -eq 'Failed') {
-        Write-Log "$Label failed: $output" 'ERROR'
+    $text = ''
+    if (Test-Path $out) {
+        $text = Get-Content $out -Raw -ErrorAction SilentlyContinue
+        Remove-Item $out -Force -ErrorAction SilentlyContinue
+    }
+    if ($p.ExitCode -ne 0) {
+        Write-Log "$Label failed (exit $($p.ExitCode)): $text" 'ERROR'
         exit 1
     }
-
-    return $output
+    return $text
 }
 
 $SharePath = $SharePath.TrimEnd('\')
@@ -71,41 +68,49 @@ Write-Log '===== Share diagnostics ====='
 Write-Log "Share : $SharePath"
 Write-Log "File  : $filePath"
 
-# 1. UNC root
-Write-Log 'Testing UNC root'
-$shareOk = Invoke-Timed -Label 'UNC root' -ArgumentList $SharePath -Script {
-    param($p)
-    Test-Path -LiteralPath $p
-}
-if (-not $shareOk) {
-    Write-Log "UNC root not reachable: $SharePath" 'ERROR'
+if ($SharePath -match '<storage>' -or $FileName -match '<installer') {
+    Write-Log 'SharePath or FileName is still the placeholder. Set both before running.' 'ERROR'
     exit 1
 }
-Write-Log 'UNC root reachable' 'SUCCESS'
 
-# 2. Directory list
-Write-Log 'Listing directory'
-$names = @(Invoke-Timed -Label 'Directory list' -ArgumentList $SharePath -Script {
-        param($p)
-        (Get-ChildItem -LiteralPath $p | Select-Object -ExpandProperty Name)
-    })
-Write-Log ("Directory listed ({0} item(s))" -f $names.Count) 'SUCCESS'
-foreach ($n in ($names | Select-Object -First 20)) {
-    Write-Log "  - $n"
+# Host from \\server\share\...
+$hostName = ($SharePath -replace '^\\\\', '' -split '\\')[0]
+Write-Log "Resolving $hostName"
+try {
+    $ips = [System.Net.Dns]::GetHostAddresses($hostName) | ForEach-Object { $_.IPAddressToString }
+    Write-Log ("Resolved: {0}" -f ($ips -join ', ')) 'SUCCESS'
+}
+catch {
+    Write-Log "DNS failed for ${hostName}: $($_.Exception.Message)" 'ERROR'
+    exit 1
 }
 
-# 3. Open file
-Write-Log 'Opening file'
-$size = Invoke-Timed -Label 'File open' -ArgumentList $filePath -Script {
-    param($p)
-    if (-not (Test-Path -LiteralPath $p)) {
-        throw "File not found: $p"
+Write-Log "Testing TCP 445 to $hostName"
+$tcp = New-Object System.Net.Sockets.TcpClient
+try {
+    $iar = $tcp.BeginConnect($hostName, 445, $null, $null)
+    if (-not $iar.AsyncWaitHandle.WaitOne($TimeoutSeconds * 1000, $false)) {
+        Write-Log "TCP 445 timed out after $TimeoutSeconds s" 'ERROR'
+        exit 1
     }
-    $fs = [System.IO.File]::Open($p, 'Open', 'Read', 'Read')
-    $len = $fs.Length
-    $fs.Dispose()
-    $len
+    $tcp.EndConnect($iar)
+    Write-Log 'TCP 445 open' 'SUCCESS'
 }
-Write-Log "File opened, size $size bytes" 'SUCCESS'
+catch {
+    Write-Log "TCP 445 failed: $($_.Exception.Message)" 'ERROR'
+    exit 1
+}
+finally {
+    $tcp.Close()
+}
+
+Write-Log 'Listing directory'
+$dirOut = Invoke-TimedProcess -Label 'Directory list' -File 'cmd.exe' -Arguments "/c dir /b `"$SharePath`""
+Write-Log 'Directory listed' 'SUCCESS'
+($dirOut -split "`r?`n" | Where-Object { $_ } | Select-Object -First 20) | ForEach-Object { Write-Log "  - $_" }
+
+Write-Log 'Opening file'
+$null = Invoke-TimedProcess -Label 'File open' -File 'cmd.exe' -Arguments "/c if exist `"$filePath`" (echo OK) else (exit /b 2)"
+Write-Log 'File exists and is reachable' 'SUCCESS'
 Write-Log 'Diagnostics passed' 'SUCCESS'
 exit 0
