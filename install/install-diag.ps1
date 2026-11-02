@@ -1,64 +1,83 @@
 <#
 .SYNOPSIS
-    Diagnostics for installer share reachability. Exits on first failure.
-    Does not install anything.
+    Share reachability check for AIB. Logs to stdout. Exits 1 on first failure.
+    Windows PowerShell 5.1. Accepts -Force so the master installer can call it.
 
 .EXAMPLE
-    .\diag-share.ps1 -SharePath '\\storage.file.core.usgovcloudapi.net\installers' -FileName '7z-x64.msi'
+    .\install-diag.ps1 -Force
 #>
+
 #Requires -Version 5.1
+
 [CmdletBinding()]
 param(
-    [Parameter(Mandatory = $false)]
     [string]$SharePath = '\\sacimapps.file.core.usgovcloudapi.net\software\7zip',
 
-    [Parameter(Mandatory = $false)]
     [string]$FileName = '7Zip-64bit.msi',
 
-    [int]$TimeoutSeconds = 30
+    [int]$TimeoutSeconds = 30,
+
+    [switch]$Force
 )
 
 $ErrorActionPreference = 'Continue'
 $ProgressPreference = 'SilentlyContinue'
 
-$logDir = 'C:\ProgramData\SDL\scripts\logs'
-if (-not (Test-Path $logDir)) {
-    New-Item -ItemType Directory -Path $logDir -Force | Out-Null
-}
-$log = Join-Path $logDir ("DiagShare_{0}.log" -f (Get-Date -Format 'yyyyMMdd'))
-
 function Write-Log {
     param([string]$Message, [string]$Level = 'INFO')
     $line = '[{0}] [{1}] {2}' -f (Get-Date -Format 'yyyy-MM-dd HH:mm:ss'), $Level, $Message
-    Write-Host $line
+    Write-Output $line
     [Console]::Out.Flush()
-    Add-Content -Path $log -Value $line
 }
 
-function Invoke-TimedProcess {
+function Fail-Diag {
+    param([string]$Message)
+    Write-Log $Message 'ERROR'
+    Write-Log 'RESULT: FAILED' 'ERROR'
+    exit 1
+}
+
+function Invoke-Cmd {
     param(
-        [string]$File,
         [string]$Arguments,
         [string]$Label
     )
 
-    $out = Join-Path $env:TEMP ("diag-{0}.txt" -f [guid]::NewGuid().ToString('N'))
-    $p = Start-Process -FilePath $File -ArgumentList $Arguments -NoNewWindow -PassThru -RedirectStandardOutput $out -RedirectStandardError $out
-    if (-not $p.WaitForExit($TimeoutSeconds * 1000)) {
-        try { $p.Kill() } catch {}
-        Write-Log "$Label timed out after $TimeoutSeconds s" 'ERROR'
-        exit 1
+    $out = Join-Path $env:TEMP ("diag-{0}.out" -f [guid]::NewGuid().ToString('N'))
+    $err = Join-Path $env:TEMP ("diag-{0}.err" -f [guid]::NewGuid().ToString('N'))
+
+    $psi = New-Object System.Diagnostics.ProcessStartInfo
+    $psi.FileName = "$env:SystemRoot\System32\cmd.exe"
+    $psi.Arguments = $Arguments
+    $psi.UseShellExecute = $false
+    $psi.CreateNoWindow = $true
+    $psi.RedirectStandardOutput = $true
+    $psi.RedirectStandardError = $true
+
+    $proc = New-Object System.Diagnostics.Process
+    $proc.StartInfo = $psi
+    $proc.Start() | Out-Null
+
+    $outTask = $proc.StandardOutput.ReadToEndAsync()
+    $errTask = $proc.StandardError.ReadToEndAsync()
+    if (-not $proc.WaitForExit($TimeoutSeconds * 1000)) {
+        try { $proc.Kill() } catch {}
+        Fail-Diag "$Label timed out after $TimeoutSeconds s"
     }
+    $proc.WaitForExit()
+
     $text = ''
-    if (Test-Path $out) {
-        $text = Get-Content $out -Raw -ErrorAction SilentlyContinue
-        Remove-Item $out -Force -ErrorAction SilentlyContinue
+    try { $text = $outTask.Result } catch {}
+    try {
+        $errText = $errTask.Result
+        if ($errText) { $text = ($text + ' ' + $errText).Trim() }
     }
-    if ($p.ExitCode -ne 0) {
-        Write-Log "$Label failed (exit $($p.ExitCode)): $text" 'ERROR'
-        exit 1
+    catch {}
+
+    return [pscustomobject]@{
+        ExitCode = $proc.ExitCode
+        Text     = $text
     }
-    return $text
 }
 
 $SharePath = $SharePath.TrimEnd('\')
@@ -68,21 +87,18 @@ Write-Log '===== Share diagnostics ====='
 Write-Log "Share : $SharePath"
 Write-Log "File  : $filePath"
 
-if ($SharePath -match '<storage>' -or $FileName -match '<installer') {
-    Write-Log 'SharePath or FileName is still the placeholder. Set both before running.' 'ERROR'
-    exit 1
+$hostName = ($SharePath -replace '^\\\\', '' -split '\\')[0]
+if (-not $hostName) {
+    Fail-Diag "Could not parse host from $SharePath"
 }
 
-# Host from \\server\share\...
-$hostName = ($SharePath -replace '^\\\\', '' -split '\\')[0]
 Write-Log "Resolving $hostName"
 try {
-    $ips = [System.Net.Dns]::GetHostAddresses($hostName) | ForEach-Object { $_.IPAddressToString }
+    $ips = @([System.Net.Dns]::GetHostAddresses($hostName) | ForEach-Object { $_.IPAddressToString })
     Write-Log ("Resolved: {0}" -f ($ips -join ', ')) 'SUCCESS'
 }
 catch {
-    Write-Log "DNS failed for ${hostName}: $($_.Exception.Message)" 'ERROR'
-    exit 1
+    Fail-Diag "DNS failed for ${hostName}: $($_.Exception.Message)"
 }
 
 Write-Log "Testing TCP 445 to $hostName"
@@ -90,27 +106,31 @@ $tcp = New-Object System.Net.Sockets.TcpClient
 try {
     $iar = $tcp.BeginConnect($hostName, 445, $null, $null)
     if (-not $iar.AsyncWaitHandle.WaitOne($TimeoutSeconds * 1000, $false)) {
-        Write-Log "TCP 445 timed out after $TimeoutSeconds s" 'ERROR'
-        exit 1
+        Fail-Diag "TCP 445 timed out after $TimeoutSeconds s. Private endpoint or NSG is blocking the build subnet."
     }
     $tcp.EndConnect($iar)
     Write-Log 'TCP 445 open' 'SUCCESS'
 }
 catch {
-    Write-Log "TCP 445 failed: $($_.Exception.Message)" 'ERROR'
-    exit 1
+    Fail-Diag "TCP 445 failed: $($_.Exception.Message)"
 }
 finally {
     $tcp.Close()
 }
 
 Write-Log 'Listing directory'
-$dirOut = Invoke-TimedProcess -Label 'Directory list' -File 'cmd.exe' -Arguments "/c dir /b `"$SharePath`""
+$dir = Invoke-Cmd -Label 'Directory list' -Arguments "/c dir /b `"$SharePath`""
+if ($dir.ExitCode -ne 0) {
+    Fail-Diag "Directory list failed (exit $($dir.ExitCode)): $($dir.Text)"
+}
 Write-Log 'Directory listed' 'SUCCESS'
-($dirOut -split "`r?`n" | Where-Object { $_ } | Select-Object -First 20) | ForEach-Object { Write-Log "  - $_" }
+($dir.Text -split "`r?`n" | Where-Object { $_ } | Select-Object -First 20) | ForEach-Object { Write-Log "  - $_" }
 
 Write-Log 'Opening file'
-$null = Invoke-TimedProcess -Label 'File open' -File 'cmd.exe' -Arguments "/c if exist `"$filePath`" (echo OK) else (exit /b 2)"
+$file = Invoke-Cmd -Label 'File open' -Arguments "/c if exist `"$filePath`" (echo OK) else (echo MISSING & exit /b 2)"
+if ($file.ExitCode -ne 0) {
+    Fail-Diag "File check failed (exit $($file.ExitCode)): $($file.Text)"
+}
 Write-Log 'File exists and is reachable' 'SUCCESS'
 Write-Log 'Diagnostics passed' 'SUCCESS'
 exit 0
