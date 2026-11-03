@@ -12,7 +12,7 @@
 
 [CmdletBinding()]
 param(
-    [string]$BlobUrl = 'https://avdautomation.blob.core.usgovcloudapi.net/software/7Zip/7Zip-64bit.msi',
+    [string]$BlobUrl = 'https://saavdsoft.blob.core.usgovcloudapi.net/software/7Zip/7Zip-64bit.msi',
 
     [int]$TimeoutSeconds = 30,
 
