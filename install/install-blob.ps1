@@ -77,11 +77,21 @@ try {
         Fail-Diag 'Managed identity returned no access token. Confirm the AIB identity is attached to the build VM.'
     }
     Write-Log 'Token acquired' 'SUCCESS'
+    if ($tokenResponse.client_id) {
+        Write-Log "Token client_id : $($tokenResponse.client_id)"
+    }
+    $payload = $tokenResponse.access_token.Split('.')[1]
+    $pad = 4 - ($payload.Length % 4)
+    if ($pad -ne 4) { $payload += ('=' * $pad) }
+    $json = [Text.Encoding]::UTF8.GetString([Convert]::FromBase64String($payload.Replace('-', '+').Replace('_', '/')))
+    $claims = $json | ConvertFrom-Json
+    Write-Log "Token oid     : $($claims.oid)"
+    Write-Log "Token appid   : $($claims.appid)"
+    Write-Log "Token aud     : $($claims.aud)"
 }
 catch {
     Fail-Diag "Token request failed: $($_.Exception.Message). Confirm the AIB user-assigned identity is on the build VM."
 }
-
 $dest = Join-Path $env:TEMP '7Zip-64bit.msi'
 if (Test-Path $dest) { Remove-Item $dest -Force }
 
