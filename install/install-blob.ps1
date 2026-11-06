@@ -14,6 +14,8 @@
 param(
     [string]$BlobUrl = 'https://saavdsoft.blob.core.usgovcloudapi.net/software/7Zip/7Zip-64bit.msi',
 
+    [string]$ClientId = '1309e7da-0be4-4d0c-a953-6377c1ff186b',
+
     [int]$TimeoutSeconds = 30,
 
     [switch]$Force
@@ -69,8 +71,8 @@ finally {
     $tcp.Close()
 }
 
-Write-Log 'Requesting managed identity token'
-$tokenUri = 'http://169.254.169.254/metadata/identity/oauth2/token?api-version=2018-02-01&resource=https%3A%2F%2Fstorage.usgovcloudapi.net%2F'
+Write-Log "Requesting token for client_id $ClientId"
+$tokenUri = "http://169.254.169.254/metadata/identity/oauth2/token?api-version=2018-02-01&resource=https%3A%2F%2Fstorage.usgovcloudapi.net%2F&client_id=$ClientId"
 try {
     $tokenResponse = Invoke-RestMethod -Headers @{ Metadata = 'true' } -Uri $tokenUri -TimeoutSec $TimeoutSeconds
     if (-not $tokenResponse.access_token) {
@@ -92,6 +94,7 @@ try {
 catch {
     Fail-Diag "Token request failed: $($_.Exception.Message). Confirm the AIB user-assigned identity is on the build VM."
 }
+
 $dest = Join-Path $env:TEMP '7Zip-64bit.msi'
 if (Test-Path $dest) { Remove-Item $dest -Force }
 
