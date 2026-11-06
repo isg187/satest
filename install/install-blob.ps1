@@ -104,7 +104,19 @@ try {
 }
 catch {
     $code = $null
-    if ($_.Exception.Response) { $code = [int]$_.Exception.Response.StatusCode }
+    $body = $null
+    $www = $null
+    if ($_.Exception.Response) {
+        $code = [int]$_.Exception.Response.StatusCode
+        try { $www = $_.Exception.Response.Headers['WWW-Authenticate'] } catch {}
+        try {
+            $stream = $_.Exception.Response.GetResponseStream()
+            $reader = New-Object System.IO.StreamReader($stream)
+            $body = $reader.ReadToEnd()
+        } catch {}
+    }
+    if ($www) { Write-Log "WWW-Authenticate: $www" 'ERROR' }
+    if ($body) { Write-Log "Response body: $body" 'ERROR' }
     if ($code -eq 403) {
         Fail-Diag 'Download failed: 403. Grant the AIB identity Storage Blob Data Reader on the software container.'
     }
