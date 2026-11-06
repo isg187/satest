@@ -72,7 +72,7 @@ finally {
 }
 
 Write-Log "Requesting token for client_id $ClientId"
-$tokenUri = "http://169.254.169.254/metadata/identity/oauth2/token?api-version=2018-02-01&resource=https%3A%2F%2Fstorage.usgovcloudapi.net%2F&client_id=$ClientId"
+$tokenUri = "http://169.254.169.254/metadata/identity/oauth2/token?api-version=2018-02-01&resource=https%3A%2F%2Fstorage.azure.com%2F&client_id=$ClientId"
 try {
     $tokenResponse = Invoke-RestMethod -Headers @{ Metadata = 'true' } -Uri $tokenUri -TimeoutSec $TimeoutSeconds
     if (-not $tokenResponse.access_token) {
